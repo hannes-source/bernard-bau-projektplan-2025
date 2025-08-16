@@ -15,6 +15,7 @@ import jsPDF from "jspdf";
 
 // ---- Hilfsfunktionen ----
 const parseISO = (s) => new Date(s + "T00:00:00");
+const toISO = (d) => d.toISOString().slice(0, 10);
 const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
 const startOfMonth = (d) => new Date(d.getFullYear(), d.getMonth(), 1);
 const endOfMonth = (d) => new Date(d.getFullYear(), d.getMonth() + 1, 0);
@@ -27,6 +28,7 @@ const fmtShort = (d) => new Intl.DateTimeFormat("de-IT", { day: "2-digit", month
 const monthLabel = (d) => new Intl.DateTimeFormat("de-IT", { month: "short", year: "numeric" }).format(d);
 const getISOWeek = (date) => { const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate())); const dayNum = d.getUTCDay() || 7; d.setUTCDate(d.getUTCDate() + 4 - dayNum); const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1)); const weekNo = Math.ceil(((d - yearStart) / 86400000 + 1) / 7); return { year: d.getUTCFullYear(), week: weekNo }; };
 
+// Farbpalette pro Chef (helle, angenehme Farben)
 const CHEF_COLORS = { DAN: "#60a5fa", HAN: "#34d399", MARK: "#fbbf24", DEFAULT: "#c084fc" };
 
 const guessDeviceName = () => {
@@ -36,6 +38,7 @@ const guessDeviceName = () => {
   return `${os} · ${browser}`;
 };
 
+// ---- Startdaten (aus deiner Liste) ----
 const initialAssignments = [
   { id: "1",  vorarbeiter: "Aberham Andreas",  baustelle: "Waldheim Reihenhäuser", ort: "Aldein",     chef: "DAN", techniker: "Letizia", start: "2025-05-20", ende: "2025-11-03" },
   { id: "2",  vorarbeiter: "Aberham Martin",   baustelle: "Hotel Seehauser",       ort: "Welschnofen", chef: "DAN", techniker: "Letizia", start: "2025-05-01", ende: "2025-10-29" },
@@ -68,7 +71,8 @@ const initialAssignments = [
   { id: "21c",vorarbeiter: "Noch zuzuweisen",  baustelle: "Kindergarten Pfatten",   ort: "Pfatten",    chef: "HAN", techniker: "Simon",   start: "2025-09-15", ende: "2026-01-02" },
 ];
 
-export default function App() {
+// ---- Component ----
+export default function Terminplaner() {
   const [items, setItems] = useState(() => { const saved = localStorage.getItem("bb_terminplan_items"); return saved ? JSON.parse(saved) : initialAssignments; });
   const [view, setView] = useState(() => localStorage.getItem("bb_terminplan_view") || "Monat");
   const [zoom, setZoom] = useState(() => Number(localStorage.getItem("bb_terminplan_zoom") || 1));
@@ -79,8 +83,10 @@ export default function App() {
   const [form, setForm] = useState({ id: "", vorarbeiter: "", baustelle: "", ort: "", chef: "", techniker: "", start: "", ende: "" });
   const [editingId, setEditingId] = useState(null);
 
+  const timelineRef = useRef(null);
   const wrapperRef = useRef(null);
 
+  // Filtered items
   const filtered = useMemo(() => {
     const q = filter.q.trim().toLowerCase();
     return items.filter((it) => {
@@ -93,9 +99,11 @@ export default function App() {
     });
   }, [items, filter]);
 
+  // Gruppen: zugewiesen vs. noch zuzuweisen
   const assigned   = useMemo(() => filtered.filter(it => (it.vorarbeiter || "").toLowerCase() !== "noch zuzuweisen"), [filtered]);
   const unassigned = useMemo(() => filtered.filter(it => (it.vorarbeiter || "").toLowerCase() ===  "noch zuzuweisen"), [filtered]);
 
+  // Zeitspanne berechnen (max 12 Monate in Jahresansicht)
   const { tStart, tEnd } = useMemo(() => {
     const list = assigned.length ? assigned : filtered;
     if (!list.length) { const today = new Date(); return { tStart: startOfMonth(today), tEnd: addDays(today, 30) }; }
@@ -107,23 +115,31 @@ export default function App() {
     return { tStart: minS, tEnd: maxE };
   }, [assigned, filtered, view]);
 
-  const totalDays = Math.max(1, Math.ceil((tEnd - tStart) / (1000*60*60*24)) + 1);
+  const totalDays = Math.max(1, diffDays(tStart, addDays(tEnd, 1)));
   const basePxPerDay = view === "Woche" ? 16 : view === "Monat" ? 6 : 3;
   const pxPerDay = basePxPerDay * zoom;
   const timelineWidth = Math.max(600, Math.round(totalDays * pxPerDay));
 
+  // Header-Ticks (Monate / Wochen)
   const ticks = useMemo(() => {
     const list = [];
     if (view === "Woche") {
       let cur = startOfWeek(tStart);
-      while (cur <= tEnd) { const { year, week } = getISOWeek(cur); const x = Math.round((cur - tStart) / 86400000 * pxPerDay); list.push({ x, label: `KW ${week} ${year}` }); cur = addDays(cur, 7); }
+      while (cur <= tEnd) { const { year, week } = getISOWeek(cur); const x = Math.round(diffDays(tStart, cur) * pxPerDay); list.push({ x, label: `KW ${week} ${year}` }); cur = addDays(cur, 7); }
     } else {
       let cur = startOfMonth(tStart);
-      while (cur <= tEnd) { const x = Math.round((cur - tStart) / 86400000 * pxPerDay); list.push({ x, label: monthLabel(cur) }); cur = new Date(cur.getFullYear(), cur.getMonth() + 1, 1); }
+      while (cur <= tEnd) { const x = Math.round(diffDays(tStart, cur) * pxPerDay); list.push({ x, label: monthLabel(cur) }); cur = new Date(cur.getFullYear(), cur.getMonth() + 1, 1); }
     }
     return list;
   }, [tStart, tEnd, pxPerDay, view]);
 
+  const unique = (arr) => Array.from(new Set(arr.filter(Boolean)));
+  const allVorarbeiter = useMemo(() => unique(items.map((i) => i.vorarbeiter)), [items]);
+  const allChefs = useMemo(() => unique(items.map((i) => i.chef)), [items]);
+  const allTechniker = useMemo(() => unique(items.map((i) => i.techniker)), [items]);
+  const allBaustellen = useMemo(() => unique(items.map((i) => i.baustelle)), [items]);
+
+  // Speichern
   const saveAll = () => {
     localStorage.setItem("bb_terminplan_items", JSON.stringify(items));
     localStorage.setItem("bb_terminplan_view", view);
@@ -135,14 +151,16 @@ export default function App() {
     setLastSaved(meta);
   };
 
+  // Export PNG
   const exportPNG = async () => {
     if (!wrapperRef.current) return;
     const node = wrapperRef.current;
     const canvas = await html2canvas(node, { scale: 2, backgroundColor: "#ffffff" });
     const url = canvas.toDataURL("image/png");
-    const a = document.createElement("a"); a.href = url; a.download = `Projektplan_${new Date().toISOString().slice(0, 10)}.png`; a.click();
+    const a = document.createElement("a"); a.href = url; a.download = `Terminplan_${new Date().toISOString().slice(0, 10)}.png`; a.click();
   };
 
+  // Export PDF (A3 quer, mehrseitig bei Bedarf)
   const exportPDF = async () => {
     if (!wrapperRef.current) return;
     const node = wrapperRef.current;
@@ -163,9 +181,10 @@ export default function App() {
         if (position < imgHeight) pdf.addPage();
       }
     }
-    pdf.save(`Projektplan_${new Date().toISOString().slice(0, 10)}.pdf`);
+    pdf.save(`Terminplan_${new Date().toISOString().slice(0, 10)}.pdf`);
   };
 
+  // Form helpers
   const openNew = () => { setEditingId(null); setForm({ id: "", vorarbeiter: "", baustelle: "", ort: "", chef: "", techniker: "", start: "", ende: "" }); setShowForm(true); };
   const openEdit = (id) => { const it = items.find((x) => x.id === id); if (!it) return; setEditingId(id); setForm(it); setShowForm(true); };
   const submitForm = () => {
@@ -176,10 +195,11 @@ export default function App() {
   };
   const deleteItem = (id) => { if (!confirm("Eintrag wirklich löschen?")) return; setItems(items.filter((i) => i.id !== id)); };
 
+  // Bar-Koordinaten
   const calcBar = (startISO, endISO) => {
     const s = parseISO(startISO), e = parseISO(endISO);
-    const leftDays = Math.max(0, Math.floor((s - tStart) / 86400000));
-    const rightDays = Math.max(0, Math.floor(((e - tStart) / 86400000)) + 1);
+    const leftDays = clamp(diffDays(tStart, s), 0, totalDays);
+    const rightDays = clamp(diffDays(tStart, addDays(e, 1)), 0, totalDays);
     const left = Math.round(leftDays * pxPerDay);
     const width = Math.max(2, Math.round((rightDays - leftDays) * pxPerDay));
     return { left, width };
@@ -194,23 +214,24 @@ export default function App() {
           <div className="mt-2 text-xs text-gray-500">{lastSaved ? (<span>Zuletzt gespeichert von <span className="font-medium">{lastSaved.editorName}</span> am {fmtDate(new Date(lastSaved.when))}</span>) : (<span>Noch nicht gespeichert</span>)}</div>
         </header>
 
+        {/* Controls */}
         <div className="flex flex-col lg:flex-row gap-3 lg:items-end bg-white rounded-2xl shadow p-3 md:p-4 mb-4">
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 flex-1">
             <select className="border rounded px-2 py-2" value={filter.vorarbeiter} onChange={(e) => setFilter({ ...filter, vorarbeiter: e.target.value })}>
               <option value="">Vorarbeiter (alle)</option>
-              {Array.from(new Set(items.map(i => i.vorarbeiter))).filter(Boolean).map(v => <option key={v} value={v}>{v}</option>)}
+              {allVorarbeiter.map((v) => (<option key={v} value={v}>{v}</option>))}
             </select>
             <select className="border rounded px-2 py-2" value={filter.baustelle} onChange={(e) => setFilter({ ...filter, baustelle: e.target.value })}>
               <option value="">Baustelle (alle)</option>
-              {Array.from(new Set(items.map(i => i.baustelle))).filter(Boolean).map(v => <option key={v} value={v}>{v}</option>)}
+              {allBaustellen.map((v) => (<option key={v} value={v}>{v}</option>))}
             </select>
             <select className="border rounded px-2 py-2" value={filter.chef} onChange={(e) => setFilter({ ...filter, chef: e.target.value })}>
               <option value="">Chef (alle)</option>
-              {Array.from(new Set(items.map(i => i.chef))).filter(Boolean).map(v => <option key={v} value={v}>{v}</option>)}
+              {allChefs.map((v) => (<option key={v} value={v}>{v}</option>))}
             </select>
             <select className="border rounded px-2 py-2" value={filter.techniker} onChange={(e) => setFilter({ ...filter, techniker: e.target.value })}>
               <option value="">Techniker (alle)</option>
-              {Array.from(new Set(items.map(i => i.techniker))).filter(Boolean).map(v => <option key={v} value={v}>{v}</option>)}
+              {allTechniker.map((v) => (<option key={v} value={v}>{v}</option>))}
             </select>
             <input className="border rounded px-3 py-2 col-span-2" placeholder="Suche… (Name, Ort, Baustelle)" value={filter.q} onChange={(e) => setFilter({ ...filter, q: e.target.value })} />
           </div>
@@ -228,6 +249,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* Toolbar */}
         <div className="flex flex-wrap gap-2 mb-3">
           <button onClick={openNew} className="px-4 py-2 rounded-xl bg-blue-600 text-white shadow">+ Eintrag</button>
           <button onClick={saveAll} className="px-4 py-2 rounded-xl bg-amber-500 text-white shadow">Speichern</button>
@@ -239,7 +261,9 @@ export default function App() {
           </div>
         </div>
 
+        {/* Grid: linke Tabelle + Timeline */}
         <div ref={wrapperRef} className="w-full overflow-hidden rounded-2xl bg-white shadow">
+          {/* Header */}
           <div className="grid" style={{ gridTemplateColumns: "520px 1fr" }}>
             <div className="border-b p-2 md:p-3 bg-gray-50 font-semibold text-sm md:text-base">Ressourcen</div>
             <div className="border-b p-0 md:p-0 relative">
@@ -256,16 +280,12 @@ export default function App() {
             </div>
           </div>
 
+          {/* Rows: nur zugewiesene */}
           <div className="max-h-[70vh] overflow-auto">
             {assigned.map((it, idx) => {
               const color = CHEF_COLORS[it.chef] || CHEF_COLORS.DEFAULT;
-              const { left, width } = (() => {
-                const s = new Date(it.start), e = new Date(it.ende);
-                const leftDays = Math.max(0, Math.floor((s - tStart) / 86400000));
-                const rightDays = Math.max(0, Math.floor((e - tStart) / 86400000) + 1);
-                return { left: Math.round(leftDays * pxPerDay), width: Math.max(2, Math.round((rightDays - leftDays) * pxPerDay)) };
-              })();
-              const dauer = Math.max(1, Math.ceil((new Date(it.ende) - new Date(it.start))/86400000)+1);
+              const { left, width } = calcBar(it.start, it.ende);
+              const dauer = Math.max(1, diffDays(parseISO(it.start), addDays(parseISO(it.ende), 1)));
               return (
                 <div key={it.id} className={`grid items-stretch ${idx % 2 ? "bg-white" : "bg-gray-50"}`} style={{ gridTemplateColumns: "520px 1fr" }}>
                   <div className="border-t p-2 md:p-3">
@@ -275,7 +295,7 @@ export default function App() {
                         <div className="font-semibold text-sm md:text-base truncate">{it.vorarbeiter}</div>
                         <div className="text-xs text-gray-600 truncate">{it.baustelle}{it.ort ? ` · ${it.ort}` : ""}</div>
                         <div className="text-xs text-gray-500">Chef: {it.chef || "–"} · Techniker: {it.techniker || "–"}</div>
-                        <div className="text-[11px] text-gray-500">{fmtShort(new Date(it.start))} – {fmtShort(new Date(it.ende))} · {dauer} Tage</div>
+                        <div className="text-[11px] text-gray-500">{fmtShort(parseISO(it.start))} – {fmtShort(parseISO(it.ende))} · {dauer} Tage</div>
                       </div>
                     </div>
                     <div className="mt-2 flex gap-2">
@@ -284,7 +304,7 @@ export default function App() {
                     </div>
                   </div>
                   <div className="border-t relative">
-                    <div className="relative" style={{ width: timelineWidth, height: 56 }}>
+                    <div ref={idx === 0 ? timelineRef : null} className="relative" style={{ width: timelineWidth, height: 56 }}>
                       {ticks.map((t, i) => (<div key={i} className="absolute top-0 bottom-0 border-l border-gray-100" style={{ left: t.x }} />))}
                       <div className="absolute top-3 h-8 rounded-2xl shadow" style={{ left, width, backgroundColor: color }}>
                         <div className="text-[10px] md:text-xs text-white px-2 py-1 truncate">{it.baustelle}</div>
@@ -301,6 +321,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* Raster für "Noch zuzuweisen" am Schluss */}
         <div className="mt-6 p-4 bg-violet-50 border border-violet-200 rounded-2xl">
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-lg font-semibold text-violet-800">Noch zuzuweisende Baustellen</h2>
@@ -329,8 +350,8 @@ export default function App() {
                       <td className="border p-2">{it.ort || "–"}</td>
                       <td className="border p-2">{it.chef || "–"}</td>
                       <td className="border p-2">{it.techniker || "–"}</td>
-                      <td className="border p-2">{fmtShort(new Date(it.start))}</td>
-                      <td className="border p-2">{fmtShort(new Date(it.ende))}</td>
+                      <td className="border p-2">{fmtShort(parseISO(it.start))}</td>
+                      <td className="border p-2">{fmtShort(parseISO(it.ende))}</td>
                       <td className="border p-2">
                         <button onClick={() => openEdit(it.id)} className="text-xs px-3 py-1 rounded bg-blue-100 hover:bg-blue-200">Zuordnen</button>
                       </td>
@@ -344,6 +365,7 @@ export default function App() {
           )}
         </div>
 
+        {/* Editor Modal */}
         {showForm && (
           <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
             <div className="bg-white rounded-2xl shadow-xl w-full max-w-3xl">
@@ -391,8 +413,11 @@ export default function App() {
           </div>
         )}
 
+        {/* Fußzeile */}
         <footer className="text-xs text-gray-500 mt-4">
-          <div>Zoom & Ansicht für 4K feinjustieren. Änderungen sind lokal speicherbar; Cloud-Sync kann später ergänzt werden.</div>
+          <div>
+            Tipp: Farben werden anhand des Chef-Kürzels vergeben. Zoom & Ansicht können für 4K feinjustiert werden. Änderungen sind lokal speicherbar und können später mit Cloud-Sync erweitert werden.
+          </div>
         </footer>
       </div>
     </div>
